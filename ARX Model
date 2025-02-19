@@ -1,0 +1,277 @@
+#
+#
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import RidgeCV, LassoCV, ElasticNetCV
+from sklearn.linear_model import Ridge, Lasso, ElasticNet
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.metrics import r2_score
+
+# Load data
+u_train = np.load('u_train.npy')
+y_train = np.load('output_train.npy')
+u_test = np.load('u_test.npy')
+
+# Reshape the arrays to 2D (n_samples, 1) before scaling
+u_train_reshaped = u_train.reshape(-1, 1)
+u_test_reshaped = u_test.reshape(-1, 1)
+
+# Initialize and fit the scaler on the training data
+scaler = StandardScaler()
+scaler.fit(u_train_reshaped)
+
+# Scale u_train and u_test
+u_train_scaled = scaler.transform(u_train_reshaped).flatten()  # Flatten to 1D
+u_test_scaled = scaler.transform(u_test_reshaped).flatten()  # Flatten to 1D
+
+# Scale y_train
+scaler_y = StandardScaler()
+y_train_scaled = scaler_y.fit_transform(y_train.reshape(-1, 1)).flatten()  # Flatten to 1D
+
+# Build the ARX regressor matrix
+def build_arx_regressor_matrix(y_train, u_train, n, m, d):
+    num_samples = len(y_train)
+    max_lag = max(n, m + d)
+    rows = num_samples - max_lag
+    X_train = np.zeros((rows, n + m))  # Initialize regressor matrix
+    for i in range(rows):
+        for j in range(n):
+            X_train[i, j] = y_train[i + max_lag - j - 1]  # Past outputs
+        for k in range(m):
+            X_train[i, n + k] = u_train[i + max_lag - d - k - 1]  # Past inputs
+    y_target = y_train[max_lag:]  # Target variable
+    return X_train, y_target
+
+
+# Define the parameter ranges
+n_values = [7, 8, 9]  # Past outputs
+m_values = [7, 8, 9]  # Past inputs
+d_values = [4, 5, 6]  # Delay
+
+
+best_sse = np.inf  # Set an initial large value for the best SSE
+best_params = None
+
+# Initialize TimeSeriesSplit for time series cross-validation
+tscv = TimeSeriesSplit(n_splits=5)
+
+# Perform Grid Search using Linear Regression
+
+for n in n_values:
+    for m in m_values:
+        for d in d_values:
+            sse_list = []
+            for train_index, val_index in tscv.split(y_train_scaled):
+                # Split the training data into training and validation sets
+                y_train_cv, y_val_cv = y_train_scaled[train_index], y_train_scaled[val_index]
+                u_train_cv, u_val_cv = u_train_scaled[train_index], u_train_scaled[val_index]
+
+                # Build ARX regressor matrix for training and validation sets
+                X_train_cv, y_train_target_cv = build_arx_regressor_matrix(y_train_cv, u_train_cv, n, m, d)
+                X_val_cv, y_val_target_cv = build_arx_regressor_matrix(y_val_cv, u_val_cv, n, m, d)
+
+                # Train the Linear Regression model (OLS)
+                lin_reg = LinearRegression()
+                lin_reg.fit(X_train_cv, y_train_target_cv)
+
+                # Predict on validation set
+                y_val_pred_lr = lin_reg.predict(X_val_cv)
+
+                # Calculate SSE on validation data
+                sse_cv_lin_reg = np.sum((y_val_target_cv - y_val_pred_lr) ** 2)
+                sse_list.append(sse_cv_lin_reg)
+
+            # Average SSE over all cross-validation folds
+            mean_sse_cv = np.mean(sse_list)
+
+            # Update best parameters if current SSE is lower
+            if mean_sse_cv < best_sse:
+                best_sse = mean_sse_cv
+                best_params = (n, m, d)
+
+# Print best parameters found with Linear Regression
+print(f"Best parameters from Linear Regression: n={best_params[0]}, m={best_params[1]}, d={best_params[2]}")
+print(f"Best cross-validated SSE from Linear Regression: {best_sse:.4f}")
+
+print("\n")
+
+# Apply Regularization Methods (Ridge, Lasso, ElasticNet) on the Best Parameters
+
+# Unpack the best n, m, d values
+n_best, m_best, d_best = best_params
+
+# Perform cross-validation again with the best parameters for Ridge, Lasso, and ElasticNet
+
+sse_ridge_list, sse_lasso_list, sse_elastic_list = [], [], []
+
+l1_ratios = np.linspace(0.1, 1.0, 10)
+
+for train_index, val_index in tscv.split(y_train_scaled):
+    # Split the training data into training and validation sets
+    y_train_cv, y_val_cv = y_train_scaled[train_index], y_train_scaled[val_index]
+    u_train_cv, u_val_cv = u_train_scaled[train_index], u_train_scaled[val_index]
+
+    # Build ARX regressor matrix for training and validation sets using best parameters
+    X_train_cv, y_train_target_cv = build_arx_regressor_matrix(y_train_cv, u_train_cv, n_best, m_best, d_best)
+    X_val_cv, y_val_target_cv = build_arx_regressor_matrix(y_val_cv, u_val_cv, n_best, m_best, d_best)
+
+    # Apply scaling
+    X_train_cv = scaler.fit_transform(X_train_cv)
+    X_val_cv = scaler.transform(X_val_cv)
+
+    # Ridge Regression
+    ridge_model = RidgeCV(alphas=np.logspace(-5, 1, 100))
+    ridge_model.fit(X_train_cv, y_train_target_cv)
+    y_val_pred_ridge = ridge_model.predict(X_val_cv)
+    sse_ridge = np.sum((y_val_target_cv - y_val_pred_ridge) ** 2)
+    sse_ridge_list.append(sse_ridge)
+
+    # Lasso Regression with increased max_iter
+    lasso_model = LassoCV(alphas=np.logspace(-5, 2, 100), max_iter=10000)  # Increased max_iter
+    lasso_model.fit(X_train_cv, y_train_target_cv)
+    y_val_pred_lasso = lasso_model.predict(X_val_cv)
+    sse_lasso = np.sum((y_val_target_cv - y_val_pred_lasso) ** 2)
+    sse_lasso_list.append(sse_lasso)
+
+
+    # ElasticNet Regression with increased max_iter
+    elastic_model = ElasticNetCV(alphas=np.logspace(-5, 2, 100),l1_ratio=np.linspace(0.1, 1.0, 10),max_iter=100000,cv=tscv)
+    elastic_model.fit(X_train_cv, y_train_target_cv)
+    y_val_pred_elastic = elastic_model.predict(X_val_cv)
+    sse_elastic = np.sum((y_val_target_cv - y_val_pred_elastic) ** 2)
+    sse_elastic_list.append(sse_elastic)
+
+# Average SSE for each regularization method
+mean_sse_ridge = np.mean(sse_ridge_list)
+mean_sse_lasso = np.mean(sse_lasso_list)
+mean_sse_elastic = np.mean(sse_elastic_list)
+
+# Determine which model performed best
+if mean_sse_ridge < mean_sse_lasso and mean_sse_ridge < mean_sse_elastic:
+    best_model = "Ridge"
+    best_sse_reg = mean_sse_ridge
+elif mean_sse_lasso < mean_sse_ridge and mean_sse_lasso < mean_sse_elastic:
+    best_model = "Lasso"
+    best_sse_reg = mean_sse_lasso
+else:
+    best_model = "ElasticNet"
+    best_sse_reg = mean_sse_elastic
+
+print(f"Best regularization model: {best_model}")
+print(f"Best cross-validated SSE: {best_sse_reg:.4f}")
+print("\n")
+
+# Build the ARX regressor matrix using the best parameters found in cross-validation
+X_train, y_train_target = build_arx_regressor_matrix(y_train_scaled, u_train_scaled, *best_params)
+
+# Based on the cross-validation result, determine which model is the best (Ridge, Lasso, or ElasticNet)
+if best_model == "Ridge":
+    # Train the Ridge model with the best alpha
+    ridge_model_final = Ridge(alphas=np.logspace(-5, 1, 500))
+    ridge_model_final.fit(X_train, y_train_target)
+
+    # Predict on the training data to calculate SSE and R^2
+    y_train_pred = ridge_model_final.predict(X_train)
+    sse_training = np.sum((y_train_target - y_train_pred) ** 2)
+    print(f"SSE on Training Data (Ridge): {sse_training:.4f}")
+    r2_training = r2_score(y_train_target, y_train_pred)
+    print(f"R^2 on Training Data (Ridge): {r2_training:.4f}")
+
+elif best_model == "Lasso":
+    # Train the Lasso model with the best alpha
+    lasso_model_final = LassoCV(alphas=np.logspace(-5, 1, 500), max_iter=10000)
+    lasso_model_final.fit(X_train, y_train_target)
+
+
+    # Predict on the training data to calculate SSE and R^2
+    y_train_pred = lasso_model_final.predict(X_train)
+    sse_training = np.sum((y_train_target - y_train_pred) ** 2)
+    print(f"SSE on Training Data (Lasso): {sse_training:.4f}")
+    r2_training = r2_score(y_train_target, y_train_pred)
+    print(f"R^2 on Training Data (Lasso): {r2_training:.4f}")
+
+
+elif best_model == "ElasticNet":
+    # Train the ElasticNet model with the best alpha and the best l1 ratio
+    elastic_model_final = ElasticNetCV(alphas=np.logspace(-5, 2, 100),l1_ratio=np.linspace(0.1, 1.0, 10),max_iter=100000,cv=tscv)
+    elastic_model_final.fit(X_train, y_train_target)
+
+    # Predict on the training data to calculate SSE and R^2
+    y_train_pred = elastic_model_final.predict(X_train)
+    sse_training = np.sum((y_train_target - y_train_pred) ** 2)
+    print(f"SSE on Training Data (ElasticNet): {sse_training:.4f}")
+    r2_training = r2_score(y_train_target, y_train_pred)
+    print(f"R^2 on Training Data (ElasticNet): {r2_training:.4f}")
+
+
+else:
+    print("The name does not match any of the tested models")
+
+
+# Initialize predictions array for test data
+y_test_pred = np.zeros(len(u_test_scaled))
+
+# Determine the best model based on the previously determined best_params
+if best_model == "Ridge":
+    final_model = ridge_model_final
+elif best_model == "Lasso":
+    final_model = lasso_model_final
+elif best_model == "ElasticNet":
+    final_model = elastic_model_final
+else:
+    print("The name does not match any of the tested models")
+
+# Predict iteratively using the best parameters
+for i in range(best_params[0], len(u_test_scaled)):  # Start at index equal to n
+    # Create the regressor for the current time step
+    X_test_step = np.zeros((1, best_params[0] + best_params[1]))  # Shape (1, n+m)
+
+    # Fill with previous predictions
+    for j in range(best_params[0]):
+        X_test_step[0, j] = y_test_pred[i - j - 1]  # Previous predictions
+
+    # Fill with current inputs considering the delay
+    for k in range(best_params[1]):
+        if i - best_params[2] - k - 1 >= 0:  # Check for valid index
+            X_test_step[0, best_params[0] + k] = u_test_scaled[i - best_params[2] - k - 1]
+
+    # Predict the next output and extract the scalar value using the final model
+    y_test_pred[i] = final_model.predict(X_test_step)[0]  # Use [0] to get the first element
+
+
+# Unscale the predicted outputs
+y_test_pred_unscaled = scaler_y.inverse_transform(y_test_pred.reshape(-1, 1)).flatten()
+
+# Save the last 400 predictions
+last_400_predictions = y_test_pred_unscaled[-400:]
+np.save('y_test.npy', last_400_predictions)
+
+
+plt.figure(figsize=(10, 10))
+
+# Plot 1: Predicted output vs time (last 400 samples)
+plt.subplot(2, 1, 1)
+plt.plot(last_400_predictions, label='Predicted Outputs (last 400 samples)')
+plt.xlabel("Time Index")
+plt.ylabel("Predicted Output")
+plt.legend()
+plt.title("Predicted Test Outputs (Last 400 Samples)")
+
+# Plot 2: Actual Values vs Predicted Values (Training set)
+plt.subplot(2, 1, 2)
+plt.scatter(y_train_target, y_train_pred, color='blue', alpha=0.5, label='All Points')
+plt.axline((0, 0), slope=1, color='red', linestyle='--', label='y = x (Ideal)')
+plt.title('Actual Values vs Predicted Values')
+plt.xlabel('Actual Values')
+plt.ylabel('Predicted Values')
+plt.legend()
+plt.axis('equal')
+
+
+plt.tight_layout()
+plt.show()
+
+
