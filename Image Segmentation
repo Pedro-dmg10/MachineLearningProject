@@ -1,0 +1,325 @@
+
+import numpy as np
+import tensorflow as tf
+import matplotlib.pyplot as plt
+import os
+from tensorflow.keras import layers, Input, Model
+from sklearn.metrics import balanced_accuracy_score, f1_score, classification_report
+from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+from tensorflow.keras.layers import Input, Conv2D, MaxPooling2D, UpSampling2D, concatenate, Dropout
+import tensorflow.keras.backend as K
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.utils.class_weight import compute_class_weight
+
+# Define the path to the dataset
+dataset_path = '/kaggle/input/ml-classification-problem2'
+
+x_trainA = np.load(os.path.join(dataset_path, 'Xtrain2_a.npy'))
+y_trainA = np.load(os.path.join(dataset_path, 'Ytrain2_a.npy'))
+x_trainB = np.load(os.path.join(dataset_path, 'Xtrain2_b.npy'))
+y_trainB = np.load(os.path.join(dataset_path, 'Ytrain2_b.npy'))
+x_testA = np.load(os.path.join(dataset_path, 'Xtest2_a.npy'))
+x_testB = np.load(os.path.join(dataset_path, 'Xtest2_b.npy'))
+
+# Reshape x_trainB and y_trainB back to 48x48 images
+x_trainB_reshaped = np.reshape(x_trainB, (-1, 48, 48, 1))  
+y_trainB_reshaped = np.reshape(y_trainB, (-1, 48, 48, 1))
+x_testB_reshaped = np.reshape(x_testB, (-1, 48, 48, 1)) 
+
+# Split data into training and validation sets (e.g., 90% train, 10% validation)
+x_train_split, x_val_split, y_train_split, y_val_split = train_test_split(x_trainB_reshaped, y_trainB_reshaped, test_size=0.10, random_state=42)
+
+print(f'Training set shape: {x_train_split.shape}, {y_train_split.shape}')
+print(f'Validation set shape: {x_val_split.shape}, {y_val_split.shape}')
+
+
+def unet_model(input_size=(48, 48, 1), num_filters=64, num_classes=1, dropout_rate=0.3):
+
+    # Define the input layer
+    inputs = Input(input_size)
+
+    # Encoder (downsampling path)
+    conv1 = Conv2D(num_filters, 3, activation='relu', padding='same')(inputs)
+    conv1 = Conv2D(num_filters, 3, activation='relu', padding='same')(conv1)
+    pool1 = MaxPooling2D(pool_size=(2, 2))(conv1)
+    pool1 = Dropout(dropout_rate)(pool1)
+
+    conv2 = Conv2D(num_filters * 2, 3, activation='relu', padding='same')(pool1)
+    conv2 = Conv2D(num_filters * 2, 3, activation='relu', padding='same')(conv2)
+    pool2 = MaxPooling2D(pool_size=(2, 2))(conv2)
+    pool2 = Dropout(dropout_rate)(pool2)
+
+    conv3 = Conv2D(num_filters * 4, 3, activation='relu', padding='same')(pool2)
+    conv3 = Conv2D(num_filters * 4, 3, activation='relu', padding='same')(conv3)
+    pool3 = MaxPooling2D(pool_size=(2, 2))(conv3)
+    pool3 = Dropout(dropout_rate)(pool3)
+
+    # Bottleneck
+    conv4 = Conv2D(num_filters * 8, 3, activation='relu', padding='same')(pool3)
+    conv4 = Conv2D(num_filters * 8, 3, activation='relu', padding='same')(conv4)
+
+    # Decoder (upsampling path)
+    up5 = UpSampling2D(size=(2, 2))(conv4)
+    up5 = concatenate([up5, conv3])
+    conv5 = Conv2D(num_filters * 4, 3, activation='relu', padding='same')(up5)
+    conv5 = Conv2D(num_filters * 4, 3, activation='relu', padding='same')(conv5)
+
+    up6 = UpSampling2D(size=(2, 2))(conv5)
+    up6 = concatenate([up6, conv2])
+    conv6 = Conv2D(num_filters * 2, 3, activation='relu', padding='same')(up6)
+    conv6 = Conv2D(num_filters * 2, 3, activation='relu', padding='same')(conv6)
+
+    up7 = UpSampling2D(size=(2, 2))(conv6)
+    up7 = concatenate([up7, conv1])
+    conv7 = Conv2D(num_filters, 3, activation='relu', padding='same')(up7)
+    conv7 = Conv2D(num_filters, 3, activation='relu', padding='same')(conv7)
+
+    # Output layer with sigmoid activation for binary classification
+    outputs = Conv2D(num_classes, 1, activation='sigmoid')(conv7)
+
+    model = Model(inputs, outputs)
+
+    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+
+    return model
+
+# Instantiate the model
+model = unet_model()
+
+y_train_flat = y_trainB.flatten()
+
+# Calculate the total number of pixels
+total_pixels = len(y_train_flat)
+
+# Count the number of pixels for each class
+class_0_count = np.sum(y_train_flat == 0)
+class_1_count = np.sum(y_train_flat == 1)
+
+# Calculate class weights
+weight_0 = total_pixels / class_0_count
+weight_1 = total_pixels / class_1_count
+
+print(f"Class 0 weight (background): {weight_0}")
+print(f"Class 1 weight (crater): {weight_1}")
+
+def weighted_dice_bce(y_true, y_pred, weight_0, weight_1):
+
+    # Flatten the inputs to apply the loss on a per-pixel basis
+    y_true_f = K.flatten(y_true)
+    y_pred_f = K.flatten(y_pred)
+    
+    # Calculate weights for each pixel
+    class_weights = y_true_f * weight_1 + (1 - y_true_f) * weight_0
+
+    # Weighted Binary Cross-Entropy
+    bce = tf.keras.losses.binary_crossentropy(y_true_f, y_pred_f)
+    weighted_bce = K.mean(class_weights * bce)
+
+    # Weighted Dice Loss
+    smooth = 1.0
+    intersection = K.sum(class_weights * y_true_f * y_pred_f)
+    dice_loss = 1 - (2. * intersection + smooth) / (K.sum(class_weights * y_true_f) + K.sum(class_weights * y_pred_f) + smooth)
+    
+    # Combine weighted BCE and weighted Dice loss
+    return 0.5 * weighted_bce + 0.5 * dice_loss
+
+
+# Custom metric to calculate balanced accuracy
+def balanced_accuracy(y_true, y_pred):
+    # Flatten the tensors to treat all pixels equally
+    y_true_f = K.flatten(y_true)
+    y_pred_f = K.cast(K.flatten(y_pred) > 0.5, K.floatx())  # Threshold at 0.5
+
+    # True positives, false negatives, false positives, true negatives
+    true_pos = K.sum(K.cast(y_true_f * y_pred_f, 'float32'))
+    false_neg = K.sum(K.cast(y_true_f * (1 - y_pred_f), 'float32'))
+    false_pos = K.sum(K.cast((1 - y_true_f) * y_pred_f, 'float32'))
+    true_neg = K.sum(K.cast((1 - y_true_f) * (1 - y_pred_f), 'float32'))
+
+    # Calculate recall for class 1 (crater) and class 0 (background)
+    recall_1 = true_pos / (true_pos + false_neg + K.epsilon())  # Crater recall
+    recall_0 = true_neg / (true_neg + false_pos + K.epsilon())  # Background recall
+
+    # Balanced accuracy is the average of recall for both classes
+    balanced_acc = (recall_1 + recall_0) / 2.0
+
+    return balanced_acc
+
+
+# Compile the model with the new weighted loss function
+model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=5e-4), 
+             loss=lambda y_true, y_pred: weighted_dice_bce(y_true, y_pred, weight_0=weight_0, weight_1=weight_1),
+              metrics=[balanced_accuracy, 'accuracy'])
+
+lr_scheduler = ReduceLROnPlateau(monitor='val_balanced_accuracy',factor=0.5, patience=2, min_lr=1e-6)
+early_stopping = EarlyStopping(monitor='val_balanced_accuracy', patience=15, restore_best_weights=True, mode='max')
+model_checkpoint = ModelCheckpoint('best_model.keras', save_best_only=True, monitor='val_balanced_accuracy', mode='max')
+
+# Fit the model with parameters
+history = model.fit(
+    x_train_split, y_train_split,
+    epochs=50,
+    batch_size=8,
+    validation_data=(x_val_split, y_val_split),
+    callbacks=[early_stopping, model_checkpoint,lr_scheduler]
+)
+
+# Predict on validation set
+y_val_pred = model.predict(x_val_split)
+y_val_pred_labels = (y_val_pred > 0.5).astype(int)
+
+y_val_true_flat = y_val_split.flatten()
+y_val_pred_flat = y_val_pred_labels.flatten()
+
+print(f'Train shape: {y_trainB.shape}')
+y_test_pred = model.predict(x_testB_reshaped)
+
+y_test_pred_labels = (y_test_pred > 0.5).astype(float)
+y_testB = y_test_pred_labels.reshape(y_test_pred_labels.shape[0], -1)
+
+
+#Plot 5 Random Images and the corresponding masks
+num_samples = 5
+indices = np.random.choice(len(x_testB_reshaped), num_samples, replace=False)
+plt.figure(figsize=(15, num_samples * 5))
+for i, idx in enumerate(indices):
+    # Get the original image and predicted mask
+    original_image = x_testB_reshaped[idx, :, :, 0]  # Original test image
+    predicted_mask = y_test_pred_labels[idx, :, :, 0]  # Predicted mask
+    
+    # Plot the original image
+    plt.subplot(num_samples, 2, i * 2 + 1)
+    plt.imshow(original_image, cmap='gray')
+    plt.title("Original Image")
+    plt.axis("off")
+    
+    # Plot the predicted mask
+    plt.subplot(num_samples, 2, i * 2 + 2)
+    plt.imshow(predicted_mask, cmap='gray')
+    plt.title("Predicted Mask")
+    plt.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# Compute the F1 score
+f1 = f1_score(y_val_true_flat, y_val_pred_flat, average='weighted')
+print(f'Validation F1 Score: {f1:.4f}')
+
+# Calculate and print the Balanced Accuracy
+balanced_accB = balanced_accuracy_score(y_val_true_flat, y_val_pred_flat)
+print(f'Balanced Accuracy on validation set: {balanced_accB:.4f}')
+
+# Classification report
+print("\nClassification Report:")
+print(classification_report(y_val_true_flat, y_val_pred_flat, zero_division=1))
+
+print(f'Train shape: {y_trainB.shape}')
+print(f'Test shape: {y_testB.shape}')
+
+# Plot the training loss and validation loss
+plt.plot(history.history['loss'], label='Training Loss')
+plt.plot(history.history['val_loss'], label='Validation Loss')
+plt.title('Training and Validation Loss')
+plt.xlabel('Epochs')
+plt.ylabel('Loss')
+plt.legend()
+plt.show()
+
+# Access metrics using the correct string keys
+plt.plot(history.history['accuracy'], label='Training Accuracy')  # 'accuracy' key for training accuracy
+plt.plot(history.history['val_accuracy'], label='Validation Accuracy')  # 'val_accuracy' key for validation accuracy
+plt.title('Training and Validation Accuracy')
+plt.xlabel('Epochs')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.show()
+
+# Plot the training balanced accuracy and validation balanced accuracy
+plt.plot(history.history['balanced_accuracy'], label='Training Balanced Accuracy')  # 'balanced_accuracy' key
+plt.plot(history.history['val_balanced_accuracy'], label='Validation Balanced Accuracy')  # 'val_balanced_accuracy' key
+plt.title('Training and Validation Balanced Accuracy')
+plt.xlabel('Epochs')
+plt.ylabel('Balanced Accuracy')
+plt.legend()
+plt.show()
+
+#TRYING VERSION A (RANDOM FOREST)
+
+subset_size = 300000  
+x_train_subsetA = x_trainA[:subset_size]
+y_train_subsetA = y_trainA[:subset_size]
+
+# Split the data into training and validation sets (without balancing)
+x_train_splitA, x_val_splitA, y_train_splitA, y_val_splitA = train_test_split(
+    x_train_subsetA, y_train_subsetA, test_size=0.20, stratify=y_train_subsetA, random_state=42)
+
+# Apply Polynomial Features to the training data
+poly = PolynomialFeatures(degree=2, interaction_only=False, include_bias=False)
+x_train_split_polyA = poly.fit_transform(x_train_splitA)
+x_val_split_polyA = poly.transform(x_val_splitA)
+x_test_polyA = poly.transform(x_testA)
+
+# Calculate class weights
+y_train_flatA = y_train_subsetA.flatten()
+total_pixels = len(y_train_flatA)
+class_0_count = np.sum(y_train_flatA == 0)
+class_1_count = np.sum(y_train_flatA == 1)
+weight_0 = total_pixels / class_0_count
+weight_1 = total_pixels / class_1_count
+class_weights_dict = {0: weight_0, 1: weight_1}
+
+# Initialize RandomForest model with class weights to handle imbalance
+rf_model = RandomForestClassifier(random_state=42, class_weight=class_weights_dict)
+
+param_grid = {
+    'n_estimators': [50], 
+    'max_depth': [10, None],
+    'min_samples_split': [2],
+    'min_samples_leaf': [1]  
+}
+
+# Use Stratified K-Folds for cross-validation
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+# Use GridSearchCV to find the best hyperparameters, optimizing for F1 score
+grid_search = GridSearchCV(rf_model, param_grid, cv=cv, scoring='f1', verbose=2, n_jobs=-1)
+grid_search.fit(x_train_split_polyA, y_train_splitA)
+
+# Get the best estimator (Random Forest model with best hyperparameters)
+best_rf_model = grid_search.best_estimator_
+
+# Print the best parameters found by GridSearchCV
+print("Best parameters found by GridSearchCV:")
+print(grid_search.best_params_)
+
+# Predict on the validation set
+y_val_predA = best_rf_model.predict(x_val_split_polyA)
+
+# Calculate and print the Balanced Accuracy
+balanced_accA = balanced_accuracy_score(y_val_splitA, y_val_predA)
+print(f'Balanced Accuracy on validation set: {balanced_accA:.4f}')
+
+# Print classification report for detailed metrics
+print("\nClassification Report:")
+print(classification_report(y_val_splitA, y_val_predA))
+
+# Predict on the test set
+y_testA = best_rf_model.predict(x_test_polyA)
+
+print(f'Train shape: {y_trainA.shape}')
+print(f'Test shape: {y_testA.shape}')
+
+
+#Pick the best model
+if (balanced_accA > balanced_accB):
+    y_test = y_testA
+    print("Model A was chosen")
+else:
+    y_test = y_testB
+    print("Model B was chosen")
+
+np.save('y_test', y_test)
