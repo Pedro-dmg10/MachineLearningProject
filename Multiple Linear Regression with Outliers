@@ -1,0 +1,290 @@
+#  Created by Pedro Gabriel
+#  28/09/2024  -  Problem 1 - Multiple Linear Regression with Outliers
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import Ridge, Lasso, ElasticNet
+from sklearn.linear_model import RidgeCV
+from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import cross_val_predict
+
+
+x_train = np.load('X_train.npy')
+y_train = np.load('y_train.npy')
+x_test = np.load('X_test.npy')
+
+
+#Initialize the scaler and scale the features
+scaler = StandardScaler()
+
+# Fit the scaler on training data and transform the features
+x_train_scaled = scaler.fit_transform(x_train)
+
+#Initialize and fit the linear regression model
+lin_reg = LinearRegression()
+lin_reg.fit(x_train_scaled, y_train)  #It computes the optimal values of the coefficients by minimizing the sum of squared errors between the actual and predicted values.
+
+
+#Predict the output
+y_train_pred = lin_reg.predict(x_train_scaled)  #For every input, it calculates the output y using the learned coefficients.
+
+#Calculate residuals
+residuals = y_train - y_train_pred
+
+#Determine a threshold for outliers
+mean_residual = np.mean(residuals)
+std_residual = np.std(residuals)
+threshold = mean_residual + 1.1 * std_residual  # Define outlier threshold
+
+#Identify outliers
+outlier_mask = np.abs(residuals) > threshold
+
+# Count the number of outliers
+num_outliers1 = np.sum(outlier_mask)
+
+#Filter the data to remove outliers
+x_train_clean = x_train_scaled[~outlier_mask]  # Keep points that are not outliers
+y_train_clean = y_train[~outlier_mask]   # Keep corresponding target values
+
+
+# Fit the linear regression model with the new polynomial features
+lin_reg_clean = LinearRegression()
+lin_reg_clean.fit(x_train_clean, y_train_clean)
+
+# Predict using the polynomial features
+y_train_pred_clean = lin_reg_clean.predict(x_train_clean)
+
+#DOING A LINEAR REGRESSION FOR THE SECOND TIME
+
+residuals2 = y_train_pred_clean - y_train_clean
+
+#Determine a threshold for outliers
+mean_residual2 = np.mean(residuals2)
+std_residual2 = np.std(residuals2)
+threshold2 = mean_residual2 + 1.1 * std_residual2  # Define outlier threshold
+
+#Identify outliers
+outlier_mask2 = np.abs(residuals2) > threshold2
+
+# Count the number of outliers
+num_outliers2 = np.sum(outlier_mask2)
+
+#Filter the data to remove outliers
+x_train_clean2 = x_train_clean[~outlier_mask2]  # Keep points that are not outliers
+y_train_clean2 = y_train_clean[~outlier_mask2]   # Keep corresponding target values
+
+
+# Fit the linear regression model with the new polynomial features
+lin_reg_clean2 = LinearRegression()
+lin_reg_clean2.fit(x_train_clean2, y_train_clean2)
+
+# Predict using the polynomial features
+y_train_pred_clean2 = lin_reg_clean2.predict(x_train_clean2)
+
+
+#DOING A LINEAR REGRESSION FOR THE THIRD TIME
+
+residuals3 = y_train_pred_clean2 - y_train_clean2
+
+#Determine a threshold for outliers
+mean_residual3 = np.mean(residuals3)
+std_residual3 = np.std(residuals3)
+threshold3 = mean_residual2 + 0.9 * std_residual3  # Define outlier threshold
+
+#Identify outliers
+outlier_mask3 = np.abs(residuals3) > threshold3
+
+# Count the number of outliers
+num_outliers3 = np.sum(outlier_mask3)
+
+#Filter the data to remove outliers
+x_train_clean3 = x_train_clean2[~outlier_mask3]  # Keep points that are not outliers
+y_train_clean3 = y_train_clean2[~outlier_mask3]   # Keep corresponding target values
+
+
+# Fit the linear regression model with the new polynomial features
+lin_reg_clean3 = LinearRegression()
+lin_reg_clean3.fit(x_train_clean3, y_train_clean3)
+
+# Predict using the polynomial features
+y_train_pred_clean3 = lin_reg_clean3.predict(x_train_clean3)
+
+num_outliers = num_outliers1 + num_outliers2 + num_outliers3
+
+#DOING RIDGE CV REGULARIZATION
+
+from sklearn.linear_model import RidgeCV, LassoCV, ElasticNetCV
+
+# Create a logarithmic range of alpha values from 10^-5 to 10^1
+alphas = np.logspace(-5, 1, 500)  # 100 values between 0.00001 and 10
+
+# RidgeCV with a range of alphas
+ridge_reg_cv = RidgeCV(alphas=alphas, store_cv_values=True)
+ridge_reg_cv.fit(x_train_clean3, y_train_clean3)
+best_alpha_ridge = ridge_reg_cv.alpha_
+print(f"Best Ridge alpha value: {best_alpha_ridge}")
+
+# LassoCV with a range of alphas
+lasso_reg_cv = LassoCV(alphas=alphas, cv=5)
+lasso_reg_cv.fit(x_train_clean3, y_train_clean3)
+best_alpha_lasso = lasso_reg_cv.alpha_
+print(f"Best Lasso alpha value: {best_alpha_lasso}")
+
+# ElasticNetCV with a range of alphas and l1_ratios
+elasticnet_reg_cv = ElasticNetCV(alphas=alphas, l1_ratio=[0.1, 0.5, 0.9], cv=5)
+elasticnet_reg_cv.fit(x_train_clean3, y_train_clean3)
+best_alpha_elastic = elasticnet_reg_cv.alpha_
+best_l1_ratio_elastic = elasticnet_reg_cv.l1_ratio_
+print(f"Best ElasticNet alpha value: {best_alpha_elastic}")
+print(f"Best ElasticNet l1_ratio: {best_l1_ratio_elastic}")
+
+
+x_test_scaled = scaler.transform(x_test)
+
+
+# Use the best alpha to fit the Ridge model
+ridge_reg_clean = Ridge(alpha=best_alpha_ridge)
+ridge_reg_clean.fit(x_train_clean3, y_train_clean3)
+y_train_pred_ridge = ridge_reg_clean.predict(x_train_clean3)
+# Make predictions on x_test using the trained Ridge model
+y_test_pred_ridge = ridge_reg_clean.predict(x_test_scaled)
+
+
+# Try Lasso
+lasso_reg = Lasso(alpha=best_alpha_lasso)
+lasso_reg.fit(x_train_clean3, y_train_clean3)
+y_train_pred_lasso = lasso_reg.predict(x_train_clean3)
+# Make predictions on x_test using the trained Lasso model
+y_test_pred_lasso = lasso_reg.predict(x_test_scaled)
+
+# Try ElasticNet
+elasticnet_reg = ElasticNet(alpha=best_alpha_elastic, l1_ratio=best_l1_ratio_elastic)  # l1_ratio balances L1 and L2
+elasticnet_reg.fit(x_train_clean3, y_train_clean3)
+y_train_pred_elastic = elasticnet_reg.predict(x_train_clean3)
+# Make predictions on x_test using the trained ElasticNet model
+y_test_pred_elastic = elasticnet_reg.predict(x_test_scaled)
+
+# Perform 5-fold cross-validation on the training data
+
+# Ridge model cross-validation predictions
+y_train_pred_ridge_cv = cross_val_predict(ridge_reg_clean, x_train_clean3, y_train_clean3, cv=5)
+sse_ridge_cv = np.sum((y_train_clean3 - y_train_pred_ridge_cv) ** 2)
+
+# Lasso model cross-validation predictions
+y_train_pred_lasso_cv = cross_val_predict(lasso_reg, x_train_clean3, y_train_clean3, cv=5)
+sse_lasso_cv = np.sum((y_train_clean3 - y_train_pred_lasso_cv) ** 2)
+
+# ElasticNet model cross-validation predictions
+y_train_pred_elastic_cv = cross_val_predict(elasticnet_reg, x_train_clean3, y_train_clean3, cv=5)
+sse_elastic_cv = np.sum((y_train_clean3 - y_train_pred_elastic_cv) ** 2)
+
+
+# Get cross-validated predictions for Ridge
+y_train_pred_ridge_cv = cross_val_predict(ridge_reg_clean, x_train_clean3, y_train_clean3, cv=5)
+sse_ridge_cv = np.sum((y_train_clean3 - y_train_pred_ridge_cv) ** 2)
+
+# Get cross-validated predictions for Lasso
+y_train_pred_lasso_cv = cross_val_predict(lasso_reg, x_train_clean3, y_train_clean3, cv=5)
+sse_lasso_cv = np.sum((y_train_clean3 - y_train_pred_lasso_cv) ** 2)
+
+# Get cross-validated predictions for ElasticNet
+y_train_pred_elastic_cv = cross_val_predict(elasticnet_reg, x_train_clean3, y_train_clean3, cv=5)
+sse_elastic_cv = np.sum((y_train_clean3 - y_train_pred_elastic_cv) ** 2)
+
+# Print the SSE results from cross-validation
+print(f"SSE from Cross-Validation for Ridge: {sse_ridge_cv:.4f}")
+print(f"SSE from Cross-Validation for Lasso: {sse_lasso_cv:.4f}")
+print(f"SSE from Cross-Validation for ElasticNet: {sse_elastic_cv:.4f}")
+
+# Select the best model based on lowest SSE
+if sse_ridge_cv < sse_lasso_cv and sse_ridge_cv < sse_elastic_cv:
+    y_test = y_test_pred_ridge
+    print("Ridge has the lowest SSE from cross-validation.")
+elif sse_lasso_cv < sse_ridge_cv and sse_lasso_cv < sse_elastic_cv:
+    y_test = y_test_pred_lasso
+    print("Lasso has the lowest SSE from cross-validation.")
+else:
+    y_test = y_test_pred_elastic
+    print("ElasticNet has the lowest SSE from cross-validation.")
+
+np.save('y_test.npy', y_test)
+
+#This part is to check if the outlier removal was successful
+
+#Calculate R-squared and SSE for original data
+r_squared_original = r2_score(y_train, y_train_pred)
+sse_original = np.sum((y_train - y_train_pred) ** 2)
+
+#Calculate R-squared and SSE for cleaned data
+r_squared_clean = r2_score(y_train_clean, y_train_pred_clean)
+sse_clean = np.sum((y_train_clean - y_train_pred_clean) ** 2)
+
+#Calculate R-squared and SSE for cleaned data(2.0)
+r_squared_clean2 = r2_score(y_train_clean2, y_train_pred_clean2)
+sse_clean2 = np.sum((y_train_clean2 - y_train_pred_clean2) ** 2)
+
+#Calculate R-squared and SSE for cleaned data(3.0)
+r_squared_clean3 = r2_score(y_train_clean3, y_train_pred_clean3)
+sse_clean3 = np.sum((y_train_clean3 - y_train_pred_clean3) ** 2)
+
+plt.figure(figsize=(12, 6))
+
+# Original Data with Outliers
+plt.subplot(1, 4, 1)
+plt.scatter(y_train, y_train_pred, color='blue', alpha=0.5, label='All Points')
+plt.axline((0, 0), slope=1, color='red', linestyle='--', label='y = x (Ideal)')
+plt.title('Original Data with Outliers')
+plt.xlabel('Actual Values')
+plt.ylabel('Predicted Values')
+plt.legend()
+plt.axis('equal')
+
+# Cleaned Data
+plt.subplot(1, 4, 2)
+plt.scatter(y_train_clean, y_train_pred_clean, color='green', alpha=0.5, label='Cleaned Data')
+plt.axline((0, 0), slope=1, color='red', linestyle='--', label='y = x (Ideal)')
+plt.title('Cleaned Data (Outliers Removed)')
+plt.xlabel('Actual Values')
+plt.ylabel('Predicted Values')
+plt.legend()
+plt.axis('equal')
+
+# Cleaned Data 2.0
+plt.subplot(1, 4, 3)
+plt.scatter(y_train_clean2, y_train_pred_clean2, color='green', alpha=0.5, label='Cleaned Data')
+plt.axline((0, 0), slope=1, color='red', linestyle='--', label='y = x (Ideal)')
+plt.title('Cleaned Data (Outliers Removed) 2.0')
+plt.xlabel('Actual Values')
+plt.ylabel('Predicted Values')
+plt.legend()
+plt.axis('equal')
+
+
+# Cleaned Data 3.0
+plt.subplot(1, 4, 4)
+plt.scatter(y_train_clean3, y_train_pred_clean3, color='green', alpha=0.5, label='Cleaned Data')
+plt.axline((0, 0), slope=1, color='red', linestyle='--', label='y = x (Ideal)')
+plt.title('Cleaned Data (Outliers Removed) 3.0')
+plt.xlabel('Actual Values')
+plt.ylabel('Predicted Values')
+plt.legend()
+plt.axis('equal')
+
+
+plt.tight_layout()
+plt.show()
+
+
+# Print metrics and number of outliers removed
+print(f"Original Data R-squared: {r_squared_original:.4f}")
+print(f"Original Data SSE: {sse_original:.4f}")
+print(f"Cleaned Data R-squared: {r_squared_clean:.4f}")
+print(f"Cleaned Data SSE: {sse_clean:.4f}")
+print(f"Cleaned Data R-squared(2.0): {r_squared_clean2:.4f}")
+print(f"Cleaned Data SSE(2.0): {sse_clean2:.4f}")
+print(f"Cleaned Data R-squared(3.0): {r_squared_clean3:.4f}")
+print(f"Cleaned Data SSE(3.0): {sse_clean3:.4f}")
+print(f"Outliers Removed: {num_outliers}")
