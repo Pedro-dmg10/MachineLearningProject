@@ -1,5 +1,5 @@
-#
-#
+#  Created by Pedro Gabriel
+#  05/10/2024  -  Problem 2 - The ARX Model
 
 import numpy as np
 import matplotlib.pyplot as plt
