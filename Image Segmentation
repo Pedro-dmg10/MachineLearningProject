@@ -1,3 +1,5 @@
+#  Created by Pedro Gabriel
+#  26/10/2024  -  Problem 4 - Image Segmentation
 
 import numpy as np
 import tensorflow as tf
