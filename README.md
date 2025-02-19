@@ -12,4 +12,4 @@ Image Segmentation (Crater Masking): Implemented a UNet-based segmentation model
 
 This project showcases experience with machine learning pipelines, data preprocessing, hyperparameter tuning, and model evaluation, providing a strong foundation in AI-driven applications.
 
-Both software are similar and the entire project was programmed in Python. The main difference in the code is how the data files, in which the models are trained, are uploaded.
+Both software are similar and the entire project was programmed in Python. The main difference in the code is how the data files, in which the models are trained, are uploaded. This choice of software was because, Kaggle allows more free hours of GPU and in order to train the classification models faster it's required the use of GPU.
