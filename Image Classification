@@ -1,0 +1,313 @@
+
+
+import numpy as np
+import keras
+import os
+import tensorflow as tf
+import matplotlib.pyplot as plt
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import f1_score, classification_report
+from sklearn.model_selection import train_test_split, GridSearchCV
+from keras import layers, Input, Model, optimizers, losses, metrics
+from keras.callbacks import Callback, ModelCheckpoint, EarlyStopping
+from skimage.feature import hog
+from skimage import exposure
+
+# Define the path to the dataset
+dataset_path = '/kaggle/input/ml-classification-problem1'
+
+x_train = np.load(os.path.join(dataset_path, 'Xtrain1.npy'))
+y_train = np.load(os.path.join(dataset_path, 'Ytrain1.npy'))
+x_test = np.load(os.path.join(dataset_path, 'Xtest1.npy'))
+x_unlabeled = np.load(os.path.join(dataset_path, 'Xtrain1_extra.npy'))
+
+
+# Reshape x_train to its image form (48x48)
+x_train_reshape = np.reshape(x_train, (-1, 48, 48, 1))  # Add grayscale channel
+x_train_normalized = x_train_reshape / 255.0  # Normalize pixel values
+x_unlabeled_reshape = np.reshape(x_unlabeled, (-1, 48, 48, 1))  
+x_unlabeled_normalized = x_unlabeled_reshape / 255.0  
+x_test_reshape = np.reshape(x_test, (-1, 48, 48, 1)) 
+x_test_normalized = x_test_reshape / 255.0
+
+# Split the training data into train and validation sets (75/25)
+x_train_split, x_val_split, y_train_split, y_val_split = train_test_split(
+    x_train_normalized, y_train, test_size=0.25, stratify=y_train, random_state=42
+    )
+
+num_unlabeled_samples = x_unlabeled_normalized.shape[0]
+print(f"Total number of unlabeled samples: {num_unlabeled_samples}")
+
+# Count the number of images with and without craters
+n_no_crater = np.sum(y_train_split == 0)
+n_crater = np.sum(y_train_split == 1)
+
+print("Nº Images Without Crater: ", n_no_crater)
+print("Nº Images With Crater: ", n_crater)
+
+# Data augmentation layers
+data_augmentation_layers = [
+    layers.RandomFlip("horizontal"),
+    layers.RandomRotation(0.1),
+]
+
+# Data Augmentation Function (No need to expand dimensions)
+def data_augmentation(images):
+    for layer in data_augmentation_layers:
+        images = layer(images)
+    return images
+
+# Select images without craters 
+x_train_no_crater = x_train_split[y_train_split == 0]
+
+# Number of augmented images to generate
+n_augment = n_crater - n_no_crater
+print(f"\nGenerating {n_augment} augmented images for class 'no crater'...\n")
+
+# Apply data augmentation to images without craters
+augmented_images = []
+for i in range(n_augment):
+    random_idx = np.random.randint(0, len(x_train_no_crater))
+    random_image = x_train_no_crater[random_idx]
+    augmented_image = data_augmentation(np.expand_dims(random_image, axis=0))  # Add batch dimension
+    augmented_image = np.squeeze(augmented_image, axis=0)  # Remove batch dimension
+    augmented_images.append(augmented_image)
+
+# Convert list to numpy array
+augmented_images = np.array(augmented_images)
+
+# Add the augmented images and labels to the training set
+x_train_augmented = np.concatenate([x_train_split, augmented_images], axis=0)
+y_train_augmented = np.concatenate([y_train_split, np.zeros(n_augment)], axis=0)
+
+# Define the CNN model
+def make_balanced_model(input_shape, num_classes):
+    inputs = Input(shape=input_shape)
+
+    x = layers.Conv2D(64, 3, activation='relu', padding='same')(inputs)
+    x = layers.MaxPooling2D(pool_size=(2, 2))(x)
+
+    x = layers.Conv2D(128, 3, activation='relu', padding='same')(x)
+    x = layers.MaxPooling2D(pool_size=(2, 2))(x)
+
+    x = layers.Conv2D(256, 3, activation='relu', padding='same')(x)
+    x = layers.MaxPooling2D(pool_size=(2, 2))(x)
+
+    x = layers.GlobalAveragePooling2D()(x)
+
+    x = layers.Dense(128, activation='relu')(x)
+    x = layers.Dropout(0.3)(x)  
+
+    outputs = layers.Dense(1, activation='sigmoid')(x)
+
+    return Model(inputs, outputs)
+
+def pseudo_labeling(model, x_labeled, y_labeled, x_unlabeled, initial_threshold=0.95, final_threshold=0.7, step=0.05, batch_size=8, epochs=5):
+    current_threshold = initial_threshold
+    
+
+    while current_threshold >= final_threshold:
+        print(f"\nTraining with threshold: {current_threshold}")
+        
+        # Predict pseudo-labels on the unlabeled data
+        pseudo_labels = model.predict(x_unlabeled)
+
+        # Apply confidence filtering to get pseudo-labeled data
+        confident_indices = np.where(pseudo_labels > current_threshold)[0]
+        confident_count = len(confident_indices)
+
+        # Combine labeled data with confident pseudo-labeled data
+        # Ensure that labels have the same dimensions as the data
+        y_labeled = np.reshape(y_labeled, (-1, 1)) 
+        pseudo_labels_confident = (pseudo_labels[confident_indices] > 0.5).astype(int) 
+        pseudo_labels_confident = np.reshape(pseudo_labels_confident, (-1, 1))  # Ensure pseudo-labels are also 2D
+        
+        x_combined = np.concatenate([x_labeled, x_unlabeled[confident_indices]], axis=0)
+        y_combined = np.concatenate([y_labeled, pseudo_labels_confident], axis=0)
+        
+        # Create a new dataset with combined labeled and pseudo-labeled data
+        train_ds_combined = tf.data.Dataset.from_tensor_slices((x_combined, y_combined)).shuffle(buffer_size=len(x_combined)).batch(batch_size)
+        
+        # Retrain the model on the combined dataset
+        model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+        model.fit(train_ds_combined, epochs=epochs, validation_data=val_ds)
+        
+        current_threshold -= step
+        
+
+    return model
+
+
+# Define the model with input shape (48, 48, 1) for grayscale images
+model = make_balanced_model(input_shape=(48, 48, 1), num_classes=2)
+
+# Callbacks setup
+
+# Define ModelCheckpoint to save only the best model
+model_checkpoint = ModelCheckpoint('best_model.keras',monitor='val_loss',save_best_only=True,mode='min',verbose=1)
+
+early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+
+callbacks = [early_stopping, model_checkpoint]
+
+# Focal loss to address class imbalance by focusing on hard-to-classify examples
+def focal_loss(gamma=2., alpha=0.25):
+    def focal_loss_fixed(y_true, y_pred):
+        epsilon = tf.keras.backend.epsilon()
+        y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
+        y_true = tf.cast(y_true, tf.float32)
+
+        alpha_t = y_true * alpha + (tf.ones_like(y_true) - y_true) * (1 - alpha)
+        p_t = y_true * y_pred + (tf.ones_like(y_true) - y_true) * (tf.ones_like(y_true) - y_pred)
+        fl = - alpha_t * tf.math.pow(tf.ones_like(y_true) - p_t, gamma) * tf.math.log(p_t)
+
+        return tf.reduce_mean(fl)
+
+    return focal_loss_fixed
+
+model.compile(optimizer=optimizers.Adam(1e-4),
+              loss=focal_loss(gamma=2., alpha=0.25),
+              metrics=[metrics.BinaryAccuracy(), metrics.Precision(), metrics.Recall()])
+
+# Create a TensorFlow dataset from training data
+train_ds = tf.data.Dataset.from_tensor_slices((x_train_augmented, y_train_augmented)).shuffle(buffer_size=len(x_train_augmented)).batch(8)
+val_ds = tf.data.Dataset.from_tensor_slices((x_val_split, y_val_split)).batch(8)
+
+
+# Train the model using the augmented dataset
+history = model.fit(train_ds, epochs=60, callbacks=callbacks, validation_data=val_ds)
+
+final_model = pseudo_labeling(model, x_train_augmented, y_train_augmented, x_unlabeled_normalized, initial_threshold=0.95, final_threshold=0.7, step=0.05)
+
+# Predict on validation set
+y_val_pred = final_model.predict(x_val_split)
+y_val_pred_labels = (y_val_pred > 0.5).astype(int)
+
+
+f1_CNN = f1_score(y_val_split, y_val_pred_labels, average='weighted')
+print(f'Validation F1 Score: {f1_CNN:.4f}')
+
+best_threshold = 0.5  # Default threshold
+best_f1 = 0
+
+# Try different thresholds between 0.3 and 0.7
+for threshold in np.arange(0.3, 0.7, 0.05):
+    y_val_pred_labels = (y_val_pred > threshold).astype(int)
+    f1 = f1_score(y_val_split, y_val_pred_labels, average='weighted')
+    if f1 > best_f1:
+        best_f1 = f1
+        best_threshold = threshold
+
+print(f'Best Threshold: {best_threshold}, Best F1 Score: {best_f1:.4f}')
+
+# Classification report
+print("\nClassification Report:")
+print(classification_report(y_val_split, y_val_pred_labels, zero_division=1))
+
+
+# Predict and then convert probabilities to binary predictions
+y_test_prob = final_model.predict(x_test_normalized)
+y_test_pred_CNN = (y_test_prob > 0.5).astype(int)
+
+# Plot some images with their predicted probabilities
+num_images_to_display = 20
+indices = np.random.choice(len(x_test_normalized), num_images_to_display, replace=False)
+
+plt.figure(figsize=(15, 12))
+for i, idx in enumerate(indices):
+    plt.subplot(4, num_images_to_display // 4, i + 1)
+    plt.imshow(x_test_normalized[idx].reshape(48, 48), cmap='gray')
+    plt.title(f"Pred: {y_test_pred_CNN[idx][0]} (Prob: {y_test_prob[idx][0]:.2f})")
+    plt.axis('off')
+
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(12, 5))
+
+# Loss plot
+plt.subplot(1, 2, 1)
+plt.plot(history.history['loss'], label='Train loss')
+plt.plot(history.history['val_loss'], label='Validation loss')
+plt.title('Model Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+
+#TRYING WITH SVM
+
+# Reshape x_train to its image form (48x48)
+x_train_reshapeSVM = np.reshape(x_train, (-1, 48, 48))  # For grayscale images
+x_test_reshapeSVM = np.reshape(x_test, (-1, 48, 48))  # Reshape test data similarly
+
+# HOG Feature Extraction
+def extract_hog_features(images):
+    hog_features = []
+    for image in images:
+        # Extract HOG features
+        feature, hog_image = hog(image, pixels_per_cell=(8, 8), cells_per_block=(2, 2), visualize=True)
+        hog_features.append(feature)
+    return np.array(hog_features)
+
+# Extract HOG features for training and test sets
+x_train_hog = extract_hog_features(x_train_reshapeSVM)
+x_test_hog = extract_hog_features(x_test_reshapeSVM)
+
+# Split the training data into train and validation sets
+x_train_splitSVM, x_val_splitSVM, y_train_splitSVM, y_val_splitSVM = train_test_split(
+    x_train_hog, y_train, test_size=0.25, stratify=y_train, random_state=42
+)
+
+# Normalize pixel values using StandardScaler
+scaler = StandardScaler()
+
+# Define SVM model and use a pipeline with normalization and grid search
+svm_pipeline = Pipeline([('scaler', scaler),('svm', SVC(kernel='rbf'))])
+
+# Grid Search for hyperparameter tuning
+param_grid = {'svm__C': [0.1, 1, 10],'svm__gamma': ['scale', 'auto', 0.1, 1, 10]}
+
+grid_search = GridSearchCV(svm_pipeline, param_grid, cv=5, scoring='f1_weighted', verbose=1)
+grid_search.fit(x_train_splitSVM, y_train_splitSVM)
+
+# Get the best model after grid search
+best_svm_model = grid_search.best_estimator_
+
+# Predict on validation set
+y_val_predSVM = best_svm_model.predict(x_val_splitSVM)
+
+# Evaluate the F1 score on validation set
+f1_SVM = f1_score(y_val_splitSVM, y_val_predSVM, average='weighted')
+print(f'Best SVM F1 Score on validation set: {f1_SVM:.4f}')
+
+# Classification report on validation set
+print("\nClassification Report on validation set:")
+print(classification_report(y_val_splitSVM, y_val_predSVM))
+
+# Predict on the test set using the best SVM model
+y_test_pred_SVM = best_svm_model.predict(x_test_hog)
+
+#See what method is the best one
+
+if f1_CNN >= f1_SVM :
+    y_test = y_test_pred_CNN
+else:
+    y_test = y_test_pred_SVM
+    
+np.save('y_test.npy', y_test.flatten())
+
+
+# Visualizing HOG features for a single image
+plt.figure(figsize=(10, 5))
+plt.subplot(1, 2, 1)
+plt.title("Sample Image Before Flattening")
+plt.imshow(x_train_reshapeSVM[0], cmap='gray')
+
+# Visualize HOG features for one image 
+feature, hog_image = hog(x_train_reshapeSVM[0], pixels_per_cell=(8, 8), cells_per_block=(2, 2), visualize=True)
+plt.subplot(1, 2, 2)
+plt.title("HOG Feature Image")
+plt.imshow(exposure.rescale_intensity(hog_image, in_range=(0, 10)), cmap='gray')
+plt.show()
